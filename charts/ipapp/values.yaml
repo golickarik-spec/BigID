@@ -3,7 +3,9 @@
 replicaCount: 1
 
 image:
-  repository: ghcr.io/golickarik-spec/ipapp
+  # CI overrides this to ghcr.io/<your-repo-owner>/ipapp automatically.
+  # For manual installs, set it: --set image.repository=<your image>.
+  repository: ghcr.io/OWNER/ipapp
   # Overridden in CI with the commit SHA. "latest" is only a local default.
   tag: "latest"
   # CI deploys from a kind-loaded image, so it overrides this to "Never".
