@@ -237,7 +237,7 @@ Push a commit that deliberately breaks a test (e.g. change an assertion in
 `ai-diagnose` posts its diagnosis as a PR comment.
 
 > 🔗 _Demonstration of the AI step on a real failed run:_
-> - Failed pipeline run: https://github.com/golickarik-spec/BigID/actions/runs/42642310561
+> - Failed pipeline run: https://github.com/golickarik-spec/BigID/actions/runs/42702848464
 > - AI diagnosis posted as a PR comment: https://github.com/golickarik-spec/BigID/pull/1
 >
 > In that run `/health` was intentionally broken to return `"healthy"`; `test_health`
