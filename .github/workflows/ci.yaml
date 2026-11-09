@@ -77,6 +77,9 @@ jobs:
   scan:
     needs: build-push
     runs-on: ubuntu-latest
+    env:
+      IMAGE_REF: ${{ needs.build-push.outputs.image_ref }}
+      TRIVY_VERSION: v0.76.2
     steps:
       - uses: actions/checkout@v4
       - name: Download image artifact
@@ -85,14 +88,13 @@ jobs:
           name: image-tar
       - name: Load image into Docker
         run: docker load -i image.tar
+      - name: Install Trivy
+        run: |
+          curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh \
+            | sh -s -- -b "${RUNNER_TEMP}/bin" "${TRIVY_VERSION}"
+          echo "${RUNNER_TEMP}/bin" >> "$GITHUB_PATH"
       - name: Generate SBOM (CycloneDX)
-        uses: aquasecurity/trivy-action@0.28.0
-        with:
-          scan-type: image
-          image-ref: ${{ needs.build-push.outputs.image_ref }}
-          format: cyclonedx
-          output: sbom.cdx.json
-          scanners: license,vuln
+        run: trivy image --format cyclonedx --output sbom.cdx.json "${IMAGE_REF}"
       - name: Upload SBOM artifact
         uses: actions/upload-artifact@v4
         with:
@@ -100,30 +102,19 @@ jobs:
           path: sbom.cdx.json
           retention-days: 7
       - name: Scan -> SARIF (non-blocking, for Security tab)
-        uses: aquasecurity/trivy-action@0.28.0
-        with:
-          scan-type: image
-          image-ref: ${{ needs.build-push.outputs.image_ref }}
-          format: sarif
-          output: trivy-results.sarif
-          severity: HIGH,CRITICAL
-          ignore-unfixed: true
-          exit-code: "0"
+        run: |
+          trivy image --format sarif --output trivy-results.sarif \
+            --severity HIGH,CRITICAL --ignore-unfixed "${IMAGE_REF}"
       - name: Upload SARIF to code scanning
         uses: github/codeql-action/upload-sarif@v3
         with:
           sarif_file: trivy-results.sarif
         continue-on-error: true
       - name: Scan gate (fail on fixable HIGH/CRITICAL)
-        uses: aquasecurity/trivy-action@0.28.0
-        with:
-          scan-type: image
-          image-ref: ${{ needs.build-push.outputs.image_ref }}
-          format: table
-          severity: HIGH,CRITICAL
-          ignore-unfixed: true
-          trivyignores: .trivyignore
-          exit-code: "1"
+        run: |
+          trivy image --exit-code 1 --format table \
+            --severity HIGH,CRITICAL --ignore-unfixed \
+            --ignorefile .trivyignore "${IMAGE_REF}"
 
   # 4) helm lint ------------------------------------------------------------
   helm-lint:
@@ -196,7 +187,14 @@ jobs:
       - name: Collect failed-job logs
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh run view "${GITHUB_RUN_ID}" --log-failed > failed.log || echo "no failed logs" > failed.log
+        run: |
+          gh run view "${GITHUB_RUN_ID}" --log-failed > failed.log 2>/dev/null || true
+          # Setup/action-resolution failures produce no per-step failed logs;
+          # fall back to the full run log so the model always has context.
+          if [ ! -s failed.log ]; then
+            echo "(no per-step failed logs captured; using full run log)" > failed.log
+            gh run view "${GITHUB_RUN_ID}" --log >> failed.log 2>/dev/null || true
+          fi
       - name: Diagnose with Claude
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
