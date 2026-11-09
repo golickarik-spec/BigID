@@ -1,0 +1,10 @@
+# Documented escape hatch for Trivy image scanning.
+#
+# The CI gate fails the build on HIGH/CRITICAL vulnerabilities that have a fix
+# available (`--ignore-unfixed`). If an unavoidable, fixable CVE ever appears in
+# a base-image package before an upstream patch lands, add its CVE id below
+# (one per line) with a comment explaining why and a review date, e.g.:
+#
+#   CVE-2025-XXXXX  # distroless base; no fix upstream yet; re-check 2026-01-01
+#
+# Keep this file empty by default — every entry is a knowingly accepted risk.

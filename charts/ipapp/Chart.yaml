@@ -1,0 +1,10 @@
+apiVersion: v2
+name: ipapp
+description: A tiny FastAPI service that returns the client's originating IP address
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+maintainers:
+  - name: golickarik-spec
+sources:
+  - https://github.com/golickarik-spec/BigID

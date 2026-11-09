@@ -1,0 +1,30 @@
+# VCS / CI / docs — never needed in the image
+.git
+.github
+.gitignore
+README.md
+*.pdf
+
+# Charts & scripts are build/deploy-time, not runtime
+charts
+scripts
+
+# Tests & dev tooling
+tests
+requirements-dev.txt
+pyproject.toml
+
+# Python caches / virtualenvs
+__pycache__
+**/__pycache__
+*.pyc
+*.pyo
+.venv
+venv
+.pytest_cache
+.ruff_cache
+
+# Local artifacts
+*.tar
+sbom*.json
+.trivyignore

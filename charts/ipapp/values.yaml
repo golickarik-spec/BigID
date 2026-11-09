@@ -1,0 +1,108 @@
+# Default values for the ipapp chart.
+
+replicaCount: 1
+
+image:
+  repository: ghcr.io/golickarik-spec/ipapp
+  # Overridden in CI with the commit SHA. "latest" is only a local default.
+  tag: "latest"
+  # CI deploys from a kind-loaded image, so it overrides this to "Never".
+  pullPolicy: IfNotPresent
+
+# Optional registry pull secret(s) for private images on a real cluster.
+imagePullSecrets: []
+
+nameOverride: ""
+fullnameOverride: ""
+
+service:
+  type: ClusterIP
+  port: 80          # service port
+  targetPort: 8000  # container port (uvicorn)
+
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  hosts:
+    - host: ipapp.local
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
+
+# Sensible, conservative defaults — overridable per environment.
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    cpu: 200m
+    memory: 128Mi
+
+# Liveness / readiness / (optional) startup probes, fully configurable.
+probes:
+  liveness:
+    enabled: true
+    path: /health
+    initialDelaySeconds: 5
+    periodSeconds: 10
+    timeoutSeconds: 2
+    failureThreshold: 3
+  readiness:
+    enabled: true
+    path: /ready
+    initialDelaySeconds: 3
+    periodSeconds: 10
+    timeoutSeconds: 2
+    failureThreshold: 3
+  startup:
+    enabled: false
+    path: /health
+    initialDelaySeconds: 0
+    periodSeconds: 5
+    timeoutSeconds: 2
+    failureThreshold: 30
+
+# Pod- and container-level hardening. Matches the distroless non-root image.
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 65532
+  runAsGroup: 65532
+  fsGroup: 65532
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  runAsNonRoot: true
+  capabilities:
+    drop:
+      - ALL
+
+# --- Configuration & secrets ------------------------------------------------
+# Plain, non-sensitive environment config rendered directly into the Deployment.
+env: []
+  # - name: FORWARDED_FOR_HEADER
+  #   value: x-forwarded-for
+
+# Arbitrary extra env entries (supports valueFrom for secretKeyRef, etc.).
+extraEnv: []
+  # - name: SOME_TOKEN
+  #   valueFrom:
+  #     secretKeyRef:
+  #       name: ipapp-secrets
+  #       key: some-token
+
+# Inject whole Secrets/ConfigMaps as env. NO secret is baked into the chart;
+# this is the extension point. See README "Secrets" for the full ladder.
+envFrom: []
+  # - secretRef:
+  #     name: ipapp-secrets
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
+podAnnotations: {}

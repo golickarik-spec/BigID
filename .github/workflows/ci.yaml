@@ -1,0 +1,221 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+# Cancel superseded runs on the same ref.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  packages: write          # push image to GHCR
+  pull-requests: write      # AI diagnosis sticky comment
+  security-events: write    # upload Trivy SARIF to the Security tab
+  actions: read             # gh run view --log-failed
+
+env:
+  IMAGE_NAME: ipapp
+
+jobs:
+  # 1) lint + unit tests ----------------------------------------------------
+  lint-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Install dev dependencies
+        run: pip install -r requirements-dev.txt
+      - name: Lint (ruff)
+        run: ruff check .
+      - name: Unit tests (pytest)
+        run: pytest -q
+
+  # 2) build image, push to GHCR, export tar for downstream jobs ------------
+  build-push:
+    needs: lint-test
+    runs-on: ubuntu-latest
+    outputs:
+      image_ref: ${{ steps.meta.outputs.image_ref }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compute image ref (lowercased owner, commit SHA tag)
+        id: meta
+        run: |
+          owner="${{ github.repository_owner }}"
+          image="ghcr.io/${owner,,}/${IMAGE_NAME}"
+          echo "image=${image}" >> "$GITHUB_OUTPUT"
+          echo "image_ref=${image}:${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build image (tagged with commit SHA)
+        run: docker build -t "${{ steps.meta.outputs.image_ref }}" .
+      - name: Tag :latest on default branch
+        if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+        run: docker tag "${{ steps.meta.outputs.image_ref }}" "${{ steps.meta.outputs.image }}:latest"
+      - name: Push image(s)
+        run: docker push --all-tags "${{ steps.meta.outputs.image }}"
+      - name: Export image to tarball
+        run: docker save "${{ steps.meta.outputs.image_ref }}" -o image.tar
+      - name: Upload image artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: image-tar
+          path: image.tar
+          retention-days: 1
+
+  # 3) vulnerability scan (hard gate) + SBOM + SARIF ------------------------
+  scan:
+    needs: build-push
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download image artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: image-tar
+      - name: Load image into Docker
+        run: docker load -i image.tar
+      - name: Generate SBOM (CycloneDX)
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          scan-type: image
+          image-ref: ${{ needs.build-push.outputs.image_ref }}
+          format: cyclonedx
+          output: sbom.cdx.json
+          scanners: license,vuln
+      - name: Upload SBOM artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom-cyclonedx
+          path: sbom.cdx.json
+          retention-days: 7
+      - name: Scan -> SARIF (non-blocking, for Security tab)
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          scan-type: image
+          image-ref: ${{ needs.build-push.outputs.image_ref }}
+          format: sarif
+          output: trivy-results.sarif
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "0"
+      - name: Upload SARIF to code scanning
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: trivy-results.sarif
+        continue-on-error: true
+      - name: Scan gate (fail on fixable HIGH/CRITICAL)
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          scan-type: image
+          image-ref: ${{ needs.build-push.outputs.image_ref }}
+          format: table
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          trivyignores: .trivyignore
+          exit-code: "1"
+
+  # 4) helm lint ------------------------------------------------------------
+  helm-lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/setup-helm@v4
+      - name: helm lint
+        run: helm lint charts/ipapp
+
+  # 5) deploy to kind + smoke test -----------------------------------------
+  deploy-smoke:
+    needs: [build-push, scan, helm-lint]
+    runs-on: ubuntu-latest
+    env:
+      CLUSTER_NAME: ipapp-ci
+      NAMESPACE: staging
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download image artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: image-tar
+      - uses: azure/setup-helm@v4
+      - name: Create kind cluster
+        uses: helm/kind-action@v1
+        with:
+          cluster_name: ipapp-ci
+      - name: Load image into kind
+        run: kind load image-archive image.tar --name "${CLUSTER_NAME}"
+      - name: Deploy with Helm
+        run: |
+          helm upgrade --install "${IMAGE_NAME}" charts/ipapp \
+            --namespace "${NAMESPACE}" --create-namespace \
+            --set image.repository="$(echo "${{ needs.build-push.outputs.image_ref }}" | cut -d: -f1)" \
+            --set image.tag="${GITHUB_SHA}" \
+            --set image.pullPolicy=Never \
+            --wait --timeout 120s
+      - name: Show rollout status
+        run: kubectl -n "${NAMESPACE}" rollout status deploy/"${IMAGE_NAME}" --timeout=120s
+      - name: Smoke test (/, /health, /ready)
+        run: |
+          kubectl -n "${NAMESPACE}" port-forward svc/"${IMAGE_NAME}" 8080:80 >/dev/null 2>&1 &
+          PF_PID=$!
+          trap 'kill $PF_PID' EXIT
+          for i in $(seq 1 15); do
+            curl -fsS http://127.0.0.1:8080/health && break
+            echo "waiting for app... ($i)"; sleep 2
+          done
+          echo "--- /health ---"; curl -fsS http://127.0.0.1:8080/health; echo
+          echo "--- /ready  ---"; curl -fsS http://127.0.0.1:8080/ready;  echo
+          echo "--- /       ---"; curl -fsS http://127.0.0.1:8080/;       echo
+      - name: Diagnostics on failure
+        if: failure()
+        run: |
+          kubectl -n "${NAMESPACE}" get pods -o wide || true
+          kubectl -n "${NAMESPACE}" describe deploy/"${IMAGE_NAME}" || true
+          kubectl -n "${NAMESPACE}" logs deploy/"${IMAGE_NAME}" --all-containers --tail=100 || true
+
+  # 6) AI diagnosis on failure ---------------------------------------------
+  ai-diagnose:
+    needs: [lint-test, build-push, scan, helm-lint, deploy-smoke]
+    if: failure()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Collect failed-job logs
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh run view "${GITHUB_RUN_ID}" --log-failed > failed.log || echo "no failed logs" > failed.log
+      - name: Diagnose with Claude
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: python scripts/ai_diagnose.py failed.log diagnosis.md
+      - name: Add to job summary
+        run: cat diagnosis.md >> "$GITHUB_STEP_SUMMARY"
+      - name: Post sticky PR comment
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const body = '<!-- ai-diagnosis -->\n' + fs.readFileSync('diagnosis.md', 'utf8');
+            const { owner, repo } = context.repo;
+            const issue_number = context.issue.number;
+            const comments = await github.rest.issues.listComments({ owner, repo, issue_number });
+            const existing = comments.data.find(c => c.body && c.body.includes('<!-- ai-diagnosis -->'));
+            if (existing) {
+              await github.rest.issues.updateComment({ owner, repo, comment_id: existing.id, body });
+            } else {
+              await github.rest.issues.createComment({ owner, repo, issue_number, body });
+            }

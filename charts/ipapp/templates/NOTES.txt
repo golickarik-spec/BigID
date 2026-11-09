@@ -1,0 +1,20 @@
+ipapp has been deployed.
+
+Release:   {{ .Release.Name }}
+Namespace: {{ .Release.Namespace }}
+Image:     {{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}
+
+Try it from inside the cluster:
+
+  kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "ipapp.fullname" . }} 8080:{{ .Values.service.port }}
+  curl -f http://127.0.0.1:8080/        # -> {"ip": "...", "source": "..."}
+  curl -f http://127.0.0.1:8080/health  # -> {"status": "ok"}
+  curl -f http://127.0.0.1:8080/ready   # -> {"status": "ready"}
+
+{{- if .Values.ingress.enabled }}
+
+Ingress is enabled on:
+{{- range .Values.ingress.hosts }}
+  http://{{ .host }}
+{{- end }}
+{{- end }}
