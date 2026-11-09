@@ -13,8 +13,10 @@ permissions:
   contents: read
   packages: write          # push image to GHCR
   pull-requests: write      # AI diagnosis sticky comment
-  security-events: write    # upload Trivy SARIF to the Security tab
-  actions: read             # gh run view --log-failed
+  security-events: write    # upload SARIF to the Security tab
+  actions: read             # read failed-job logs via the API
+  id-token: write           # keyless cosign signing + SLSA provenance (OIDC)
+  attestations: write       # actions/attest-build-provenance
 
 env:
   IMAGE_NAME: ipapp
@@ -42,6 +44,8 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       image_ref: ${{ steps.meta.outputs.image_ref }}
+      image: ${{ steps.meta.outputs.image }}
+      digest: ${{ steps.digest.outputs.digest }}
     steps:
       - uses: actions/checkout@v4
       - name: Compute image ref (lowercased owner, commit SHA tag)
@@ -64,6 +68,13 @@ jobs:
         run: docker tag "${{ steps.meta.outputs.image_ref }}" "${{ steps.meta.outputs.image }}:latest"
       - name: Push image(s)
         run: docker push --all-tags "${{ steps.meta.outputs.image }}"
+      - name: Resolve pushed digest
+        id: digest
+        run: |
+          digest=$(docker inspect --format='{{index .RepoDigests 0}}' \
+            "${{ steps.meta.outputs.image_ref }}" | cut -d@ -f2)
+          echo "digest=${digest}" >> "$GITHUB_OUTPUT"
+          echo "pushed ${{ steps.meta.outputs.image }}@${digest}"
       - name: Export image to tarball
         run: docker save "${{ steps.meta.outputs.image_ref }}" -o image.tar
       - name: Upload image artifact
@@ -72,6 +83,24 @@ jobs:
           name: image-tar
           path: image.tar
           retention-days: 1
+      # --- supply-chain: keyless signing + provenance (operate on the digest) ---
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+      - name: Sign image (keyless, Sigstore OIDC)
+        run: cosign sign --yes "${{ steps.meta.outputs.image }}@${{ steps.digest.outputs.digest }}"
+      - name: Verify the signature we just made
+        run: |
+          cosign verify "${{ steps.meta.outputs.image }}@${{ steps.digest.outputs.digest }}" \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+            --certificate-identity-regexp \
+            "^https://github.com/${{ github.repository }}/.github/workflows/ci.yaml@.*" \
+            > /dev/null && echo "signature verified"
+      - name: Attest SLSA build provenance
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-name: ${{ steps.meta.outputs.image }}
+          subject-digest: ${{ steps.digest.outputs.digest }}
+          push-to-registry: true
 
   # 3) vulnerability scan (hard gate) + SBOM + SARIF ------------------------
   scan:
@@ -79,6 +108,8 @@ jobs:
     runs-on: ubuntu-latest
     env:
       IMAGE_REF: ${{ needs.build-push.outputs.image_ref }}
+      IMAGE: ${{ needs.build-push.outputs.image }}
+      DIGEST: ${{ needs.build-push.outputs.digest }}
       TRIVY_VERSION: v0.76.2
     steps:
       - uses: actions/checkout@v4
@@ -101,6 +132,18 @@ jobs:
           name: sbom-cyclonedx
           path: sbom.cdx.json
           retention-days: 7
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Attest SBOM to the image (keyless)
+        run: |
+          cosign attest --yes --type cyclonedx \
+            --predicate sbom.cdx.json "${IMAGE}@${DIGEST}"
       - name: Scan -> SARIF (non-blocking, for Security tab)
         run: |
           trivy image --format sarif --output trivy-results.sarif \
@@ -109,6 +152,7 @@ jobs:
         uses: github/codeql-action/upload-sarif@v3
         with:
           sarif_file: trivy-results.sarif
+          category: trivy-image
         continue-on-error: true
       - name: Scan gate (fail on HIGH/CRITICAL)
         run: |
@@ -124,6 +168,83 @@ jobs:
       - uses: azure/setup-helm@v4
       - name: helm lint
         run: helm lint charts/ipapp
+
+  # 4b) static analysis: secrets, SAST, Dockerfile + IaC misconfig ----------
+  # Blocking: gitleaks (secrets) + bandit (python SAST).
+  # Annotate-only (SARIF to Security tab): hadolint + trivy config — these flag
+  # the unavoidable Chainguard ':latest' base, so they must not gate.
+  static-analysis:
+    runs-on: ubuntu-latest
+    env:
+      GITLEAKS_VERSION: "8.21.2"
+      TRIVY_VERSION: v0.76.2
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # full history so gitleaks can scan past commits
+      # --- secret scanning (BLOCKING) ---
+      - name: Install gitleaks
+        run: |
+          curl -sSL "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" \
+            | tar -xz -C "${RUNNER_TEMP}" gitleaks
+          echo "${RUNNER_TEMP}" >> "$GITHUB_PATH"
+      - name: gitleaks (secret scan)
+        run: gitleaks detect --source . --redact --report-format sarif --report-path gitleaks.sarif
+      - name: Upload gitleaks SARIF
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: gitleaks.sarif
+          category: gitleaks
+        continue-on-error: true
+      # --- python SAST (BLOCKING) ---
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install bandit
+        run: pip install "bandit[sarif]>=1.8"
+      - name: Bandit SARIF report
+        run: bandit -r app/ -f sarif -o bandit.sarif || true
+      - name: Upload bandit SARIF
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: bandit.sarif
+          category: bandit
+        continue-on-error: true
+      - name: Bandit gate
+        run: bandit -r app/
+      # --- Dockerfile lint (ANNOTATE) ---
+      - name: hadolint (Dockerfile)
+        uses: hadolint/hadolint-action@v3.1.0
+        with:
+          dockerfile: Dockerfile
+          format: sarif
+          output-file: hadolint.sarif
+          no-fail: true
+          ignore: DL3007   # Chainguard free tier only serves :latest
+      - name: Upload hadolint SARIF
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: hadolint.sarif
+          category: hadolint
+        continue-on-error: true
+      # --- IaC / config misconfig: Dockerfile + Helm chart (ANNOTATE) ---
+      - name: Install Trivy
+        run: |
+          curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh \
+            | sh -s -- -b "${RUNNER_TEMP}/bin" "${TRIVY_VERSION}"
+          echo "${RUNNER_TEMP}/bin" >> "$GITHUB_PATH"
+      - name: Trivy config (misconfig scan)
+        run: trivy config --format sarif --output trivyconfig.sarif . || true
+      - name: Upload trivy-config SARIF
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: trivyconfig.sarif
+          category: trivy-config
+        continue-on-error: true
 
   # 5) deploy to kind + smoke test -----------------------------------------
   deploy-smoke:
@@ -176,7 +297,7 @@ jobs:
 
   # 6) AI diagnosis on failure ---------------------------------------------
   ai-diagnose:
-    needs: [lint-test, build-push, scan, helm-lint, deploy-smoke]
+    needs: [lint-test, build-push, scan, helm-lint, static-analysis, deploy-smoke]
     if: failure()
     runs-on: ubuntu-latest
     steps:
@@ -196,11 +317,13 @@ jobs:
           failed_ids=$(gh api "repos/${REPO}/actions/runs/${GITHUB_RUN_ID}/jobs" \
             --paginate --jq '.jobs[] | select(.conclusion=="failure") | .id')
           : > failed.log
+          names=""
           if [ -z "$failed_ids" ]; then
             echo "(no failed jobs reported by the API)" > failed.log
           else
             for jid in $failed_ids; do
               name=$(gh api "repos/${REPO}/actions/jobs/${jid}" --jq '.name')
+              names="${names:+$names, }${name}"
               echo "===== FAILED JOB: ${name} (id ${jid}) =====" >> failed.log
               # The logs endpoint 302-redirects to blob storage. Use curl (not
               # `gh api`) so the Authorization header is dropped on the
@@ -213,6 +336,7 @@ jobs:
               echo >> failed.log
             done
           fi
+          echo "FAILED_JOBS=${names:-unknown}" >> "$GITHUB_ENV"
           echo "collected $(wc -c < failed.log) bytes of logs"
       - name: Diagnose with Claude
         env:
