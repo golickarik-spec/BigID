@@ -202,7 +202,13 @@ jobs:
             for jid in $failed_ids; do
               name=$(gh api "repos/${REPO}/actions/jobs/${jid}" --jq '.name')
               echo "===== FAILED JOB: ${name} (id ${jid}) =====" >> failed.log
-              gh api "repos/${REPO}/actions/jobs/${jid}/logs" >> failed.log 2>/dev/null \
+              # The logs endpoint 302-redirects to blob storage. Use curl (not
+              # `gh api`) so the Authorization header is dropped on the
+              # cross-host redirect; otherwise the signed URL returns 403.
+              curl -sSL -H "Authorization: Bearer ${GH_TOKEN}" \
+                -H "Accept: application/vnd.github+json" \
+                "https://api.github.com/repos/${REPO}/actions/jobs/${jid}/logs" \
+                >> failed.log 2>/dev/null \
                 || echo "(could not fetch logs for job ${jid})" >> failed.log
               echo >> failed.log
             done
