@@ -104,16 +104,16 @@ jobs:
       - name: Scan -> SARIF (non-blocking, for Security tab)
         run: |
           trivy image --format sarif --output trivy-results.sarif \
-            --severity HIGH,CRITICAL --ignore-unfixed "${IMAGE_REF}"
+            --severity HIGH,CRITICAL "${IMAGE_REF}"
       - name: Upload SARIF to code scanning
         uses: github/codeql-action/upload-sarif@v3
         with:
           sarif_file: trivy-results.sarif
         continue-on-error: true
-      - name: Scan gate (fail on fixable HIGH/CRITICAL)
+      - name: Scan gate (fail on HIGH/CRITICAL)
         run: |
           trivy image --exit-code 1 --format table \
-            --severity HIGH,CRITICAL --ignore-unfixed \
+            --severity HIGH,CRITICAL \
             --ignorefile .trivyignore "${IMAGE_REF}"
 
   # 4) helm lint ------------------------------------------------------------

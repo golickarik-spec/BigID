@@ -59,11 +59,13 @@ curl -s localhost:8000/health
 docker images ipapp:local      # compact distroless runtime image
 ```
 
-The [`Dockerfile`](Dockerfile) is **multi-stage**: dependencies are built on
-`python:3.11-slim`, then copied into a **Google distroless** `python3-debian12`
-runtime (no shell, no package manager, runs as non-root uid 65532). The build and
-runtime CPython versions are kept in lock-step (3.11) so compiled wheels stay
-ABI-compatible.
+The [`Dockerfile`](Dockerfile) is **multi-stage**: dependencies are installed
+into a virtualenv on Chainguard's `python:latest-dev` image, then the venv is
+copied into a **Chainguard distroless** `python:latest` runtime (no shell, no
+package manager, runs as non-root uid 65532). Both stages share the same
+Chainguard Python build, so the venv stays ABI-compatible. Chainguard is
+continuously rebuilt to carry ~zero known CVEs, which keeps the strict
+HIGH/CRITICAL scan gate green.
 
 ### Kind (local Kubernetes)
 
@@ -143,22 +145,21 @@ external registry credentials. Visible on the repo's **Packages** tab.
 
 ### Vulnerability scan & SBOM policy
 
-- **Gate:** Trivy fails the pipeline on **HIGH/CRITICAL** findings that have a fix
-  available (`--ignore-unfixed`). Using digest-pinnable distroless keeps this
-  reliably green; the `--ignore-unfixed` policy avoids red builds for base-OS CVEs
-  with no upstream patch yet.
+- **Gate:** Trivy fails the pipeline on **any HIGH/CRITICAL** vulnerability in the
+  whole image (application dependencies + base). The Chainguard base is
+  continuously rebuilt to ~zero CVEs, so this strict gate stays green without an
+  `--ignore-unfixed` relaxation.
 - **Escape hatch:** [`.trivyignore`](.trivyignore) — empty by default; every entry
   is a knowingly accepted, dated risk.
 - **SBOM:** a CycloneDX SBOM is produced every run and uploaded as the
   `sbom-cyclonedx` artifact.
 - **SARIF:** results are uploaded to the GitHub **Security → Code scanning** tab.
 
-> **Pinning the base image by digest (recommended for reproducibility):**
-> ```bash
-> docker buildx imagetools inspect gcr.io/distroless/python3-debian12:nonroot
-> ```
-> then replace the `FROM gcr.io/distroless/python3-debian12:nonroot` line with
-> `FROM gcr.io/distroless/python3-debian12@sha256:<digest>`.
+> **Note on base-image choice:** a Debian-based distroless image was evaluated
+> first, but its pinned tag lags Debian security point-releases, so a strict
+> HIGH/CRITICAL gate goes red as Trivy's DB learns of new base-OS CVEs. Chainguard's
+> continuously-patched image keeps the strict gate green; the trade-off is that the
+> free tier serves the floating `:latest` tag rather than a pinnable digest.
 
 ### AI failure diagnosis
 
