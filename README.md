@@ -149,8 +149,11 @@ external registry credentials. Visible on the repo's **Packages** tab.
   whole image (application dependencies + base). The Chainguard base is
   continuously rebuilt to ~zero CVEs, so this strict gate stays green without an
   `--ignore-unfixed` relaxation.
-- **Escape hatch:** [`.trivyignore`](.trivyignore) — empty by default; every entry
-  is a knowingly accepted, dated risk.
+- **Escape hatch:** [`.trivyignore`](.trivyignore) — every entry is a knowingly
+  accepted, dated risk. Currently holds one exception: `CVE-2025-47273`
+  (`setuptools` path traversal) present only in the Chainguard base image's
+  system Python, unused at runtime and unremovable from the distroless layer;
+  it clears on the next base rebuild.
 - **SBOM:** a CycloneDX SBOM is produced every run and uploaded as the
   `sbom-cyclonedx` artifact.
 - **SARIF:** results are uploaded to the GitHub **Security → Code scanning** tab.

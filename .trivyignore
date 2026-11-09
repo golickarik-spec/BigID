@@ -1,12 +1,16 @@
 # Documented escape hatch for Trivy image scanning.
 #
-# The CI gate fails the build on any HIGH/CRITICAL vulnerability in the image
-# (application dependencies + the Chainguard base). Chainguard is continuously
-# rebuilt to carry ~zero known CVEs, so this should stay empty. If an
-# unavoidable HIGH/CRITICAL ever appears before an upstream rebuild lands, add
-# its CVE id below (one per line) with a comment explaining why and a review
-# date, e.g.:
-#
-#   CVE-2025-XXXXX  # base image; awaiting Chainguard rebuild; re-check 2026-01-01
-#
-# Keep this file empty by default — every entry is a knowingly accepted risk.
+# The CI gate fails the build on any HIGH/CRITICAL vulnerability in the whole
+# image (application dependencies + base). Chainguard is continuously rebuilt to
+# carry ~zero known CVEs, so this should stay (nearly) empty. Every entry below
+# is a knowingly accepted, dated risk — re-check and remove when upstream ships
+# a fix.
+
+# CVE-2025-47273 — setuptools path traversal (fixed upstream in 78.1.1).
+# Present only as setuptools 70.3.0 in the Chainguard BASE image's system Python
+# (Trivy target "Python", /usr/lib/.../site-packages) — NOT in our application
+# venv, which ships setuptools 84.2.1. setuptools is build-time tooling and is
+# not invoked by the running service. It cannot be removed from the distroless
+# runtime (no shell for `RUN rm`); it clears when Chainguard rebuilds its base.
+# Accepted: 2026-11-09 · re-check: 2026-12-09
+CVE-2025-47273
