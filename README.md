@@ -117,19 +117,21 @@ Recommended ladder, least → most robust:
 
 ## CI (GitHub Actions)
 
-[`.github/workflows/ci.yaml`](.github/workflows/ci.yaml) runs on every push and PR
-as a 6-job graph:
+[`.github/workflows/ci.yaml`](.github/workflows/ci.yaml) runs on every push and PR:
 
 | Job | What it does | Gate |
 |-----|--------------|------|
 | `lint-test` | `ruff check` + `pytest` | fails on lint/test errors |
-| `build-push` | build image, tag with **commit SHA** (+`latest` on default branch), push to **GHCR**, export a tarball artifact | — |
-| `scan` | **Trivy** image scan + **CycloneDX SBOM** artifact + **SARIF** to the Security tab | **hard-fail** on fixable HIGH/CRITICAL |
+| `build-push` | build image, tag with **commit SHA** (+`latest` on default branch), push to **GHCR**, **cosign-sign**, **verify**, attach **SLSA provenance** | — |
+| `scan` | **Trivy** image scan + **CycloneDX SBOM** (also **cosign-attested** to the image) + **SARIF** | **hard-fail** on HIGH/CRITICAL |
+| `static-analysis` | **gitleaks** (secrets) + **Bandit** (SAST) + **hadolint** + **Trivy config** | secrets/SAST block; lint/misconfig annotate |
 | `helm-lint` | `helm lint charts/ipapp` | fails on chart errors |
 | `deploy-smoke` | spin ephemeral **kind**, `kind load` the image, `helm upgrade --install` into `staging`, then smoke-test `/health`, `/ready`, `/` | fails on non-200 |
-| `ai-diagnose` | on **failure only**: collect failed-job logs → Claude → PR comment + job summary | advisory |
+| `ai-diagnose` | on **failure only**: collect failed-job logs → Claude → formatted PR comment + job summary | advisory |
 
-The overall green check / red X **is** the notification (GitHub commit/PR status).
+A separate [`codeql.yml`](.github/workflows/codeql.yml) runs **CodeQL** SAST on
+push/PR and weekly. The overall green check / red X **is** the notification
+(GitHub commit/PR status).
 
 ### Image registry
 
@@ -164,13 +166,62 @@ external registry credentials. Visible on the repo's **Packages** tab.
 > continuously-patched image keeps the strict gate green; the trade-off is that the
 > free tier serves the floating `:latest` tag rather than a pinnable digest.
 
+### Supply-chain security
+
+Every pushed image is **signed and attested** with [Sigstore
+cosign](https://docs.sigstore.dev/) — keyless, using the workflow's GitHub OIDC
+identity, so there are **no private keys** to store or rotate.
+
+- **Image signature** — `cosign sign`, then `cosign verify` in the same run.
+- **SLSA build provenance** — `actions/attest-build-provenance` records how/where the
+  image was built, pushed to the registry and viewable on the GHCR package.
+- **SBOM attestation** — the CycloneDX SBOM is attached to the image digest via
+  `cosign attest --type cyclonedx`.
+
+Verify it yourself (replace `<DIGEST>` with the pushed `sha256:…`):
+
+```bash
+cosign verify ghcr.io/golickarik-spec/ipapp@<DIGEST> \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  --certificate-identity-regexp \
+  "^https://github.com/golickarik-spec/BigID/.github/workflows/ci.yaml@.*"
+
+# SBOM attestation
+cosign verify-attestation --type cyclonedx ghcr.io/golickarik-spec/ipapp@<DIGEST> \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  --certificate-identity-regexp \
+  "^https://github.com/golickarik-spec/BigID/.github/workflows/ci.yaml@.*"
+```
+
+### Security scanning
+
+Results land in **Security → Code scanning** as SARIF (each tool under its own
+category):
+
+| Tool | Scope | Policy |
+|------|-------|--------|
+| **CodeQL** | Python SAST (push/PR + weekly) | annotate |
+| **gitleaks** | committed secrets (full history) | **blocking** |
+| **Bandit** | Python security SAST | **blocking** |
+| **Trivy image** | image CVEs | **blocking** (HIGH/CRITICAL) |
+| **hadolint** | Dockerfile best practices | annotate |
+| **Trivy config** | Dockerfile + Helm misconfig | annotate |
+
+Dockerfile-lint and misconfig scans are **annotate-only** because they flag the
+Chainguard `:latest` base pin (`DL3007` / `DS001`), which is unavoidable on the
+free tier — gating on it would redden the pipeline for a documented, accepted
+trade-off. Secret and SAST findings **block**.
+
 ### AI failure diagnosis
 
 [`scripts/ai_diagnose.py`](scripts/ai_diagnose.py) (stdlib-only) sends the tail of
-the failed-job logs to Anthropic **Claude (`claude-haiku-4-5`)** and asks for the
-failing step, likely root cause, and a suggested fix. The result is posted as a
-sticky PR comment and appended to the run's job summary. If `ANTHROPIC_API_KEY` is
-not set, the step degrades gracefully with a notice instead of failing.
+the failed-job logs to Anthropic **Claude (`claude-haiku-4-5`)**, which returns a
+**structured JSON** diagnosis (failing step, root cause, suggested fix, confidence,
+category). The script renders it into a consistent markdown comment — a confidence
+badge, a context table (run, commit, branch, failed jobs), numbered fix steps, and
+a collapsible log excerpt — posted as a sticky PR comment and appended to the job
+summary. If the model's reply isn't valid JSON it falls back to a prose rendering,
+and if `ANTHROPIC_API_KEY` is unset the step degrades gracefully with a notice.
 
 ## Setup checklist (one-time)
 
@@ -185,7 +236,14 @@ Push a commit that deliberately breaks a test (e.g. change an assertion in
 `tests/test_app.py`) on a branch and open a PR. The pipeline fails, and
 `ai-diagnose` posts its diagnosis as a PR comment.
 
-> 🔗 _Failed-run link demonstrating the AI step:_ **<add link after first failed run>**
+> 🔗 _Demonstration of the AI step on a real failed run:_
+> - Failed pipeline run: https://github.com/golickarik-spec/BigID/actions/runs/42642310561
+> - AI diagnosis posted as a PR comment: https://github.com/golickarik-spec/BigID/pull/1
+>
+> In that run `/health` was intentionally broken to return `"healthy"`; `test_health`
+> failed, and the `ai-diagnose` job correctly identified the failing step
+> (`pytest -q` / `test_health`), the root cause (response body mismatch), and the
+> exact fix (line 36 of `tests/test_app.py`).
 
 ## Repository layout
 

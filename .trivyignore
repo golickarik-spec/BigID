@@ -1,5 +1,11 @@
 # Documented escape hatch for Trivy image scanning.
 #
+# Applies to the `scan` job's IMAGE gate (trivy image). The separate misconfig
+# scan (trivy config) and hadolint run annotate-only (SARIF to the Security tab,
+# non-blocking), because they flag the Chainguard ':latest' base pin (DS001 /
+# DL3007) that the free tier makes unavoidable — so no ignore entry is needed
+# for those.
+#
 # The CI gate fails the build on any HIGH/CRITICAL vulnerability in the whole
 # image (application dependencies + base). Chainguard is continuously rebuilt to
 # carry ~zero known CVEs, so this should stay (nearly) empty. Every entry below
