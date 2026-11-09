@@ -58,7 +58,9 @@ def root(request: Request) -> JSONResponse:
 @app.get("/health")
 def health() -> JSONResponse:
     """Liveness: the process is up and serving."""
-    return JSONResponse({"status": "ok"})
+    # DEMO: intentionally returns "healthy" instead of "ok" to make test_health
+    # fail, so the CI AI-diagnosis step has a real failure to analyse.
+    return JSONResponse({"status": "healthy"})
 
 
 @app.get("/ready")
