@@ -10,9 +10,12 @@ WORKDIR /app
 ENV PATH="/app/venv/bin:$PATH"
 
 # Self-contained virtualenv we can copy wholesale into the runtime image.
+# Upgrade the venv's bootstrap pip/setuptools first so the runtime image carries
+# no known-vulnerable build tooling (keeps the strict HIGH/CRITICAL gate green).
 RUN python -m venv /app/venv
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir --upgrade pip setuptools \
+    && pip install --no-cache-dir -r requirements.txt
 
 # --- Stage 2: runtime -----------------------------------------------------
 # Chainguard distroless Python: no shell/package manager, runs as non-root
