@@ -187,14 +187,27 @@ jobs:
       - name: Collect failed-job logs
         env:
           GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
         run: |
-          gh run view "${GITHUB_RUN_ID}" --log-failed > failed.log 2>/dev/null || true
-          # Setup/action-resolution failures produce no per-step failed logs;
-          # fall back to the full run log so the model always has context.
-          if [ ! -s failed.log ]; then
-            echo "(no per-step failed logs captured; using full run log)" > failed.log
-            gh run view "${GITHUB_RUN_ID}" --log >> failed.log 2>/dev/null || true
+          set +e
+          # `gh run view --log` can't download logs while the run is still in
+          # progress (this job is part of it). Instead pull each already-finished
+          # failed job's logs directly via the jobs REST API.
+          failed_ids=$(gh api "repos/${REPO}/actions/runs/${GITHUB_RUN_ID}/jobs" \
+            --paginate --jq '.jobs[] | select(.conclusion=="failure") | .id')
+          : > failed.log
+          if [ -z "$failed_ids" ]; then
+            echo "(no failed jobs reported by the API)" > failed.log
+          else
+            for jid in $failed_ids; do
+              name=$(gh api "repos/${REPO}/actions/jobs/${jid}" --jq '.name')
+              echo "===== FAILED JOB: ${name} (id ${jid}) =====" >> failed.log
+              gh api "repos/${REPO}/actions/jobs/${jid}/logs" >> failed.log 2>/dev/null \
+                || echo "(could not fetch logs for job ${jid})" >> failed.log
+              echo >> failed.log
+            done
           fi
+          echo "collected $(wc -c < failed.log) bytes of logs"
       - name: Diagnose with Claude
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
