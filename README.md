@@ -185,7 +185,14 @@ Push a commit that deliberately breaks a test (e.g. change an assertion in
 `tests/test_app.py`) on a branch and open a PR. The pipeline fails, and
 `ai-diagnose` posts its diagnosis as a PR comment.
 
-> 🔗 _Failed-run link demonstrating the AI step:_ **<add link after first failed run>**
+> 🔗 _Demonstration of the AI step on a real failed run:_
+> - Failed pipeline run: https://github.com/golickarik-spec/BigID/actions/runs/42642310561
+> - AI diagnosis posted as a PR comment: https://github.com/golickarik-spec/BigID/pull/1
+>
+> In that run `/health` was intentionally broken to return `"healthy"`; `test_health`
+> failed, and the `ai-diagnose` job correctly identified the failing step
+> (`pytest -q` / `test_health`), the root cause (response body mismatch), and the
+> exact fix (line 36 of `tests/test_app.py`).
 
 ## Repository layout
 
